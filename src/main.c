@@ -11,6 +11,16 @@
 
 #include "http.h"
 
+#define HORIZONTAL_FOV 60.0f
+#define HORIZONTAL_FOV_HALF HORIZONTAL_FOV / 2
+
+#define VERTICAL_FOV 30.0f
+#define VERTICAL_FOV_HALF VERTICAL_FOV / 2
+
+int HORIZONTAL_PIXELS = 80;
+int VERTICAL_PIXELS = 60;
+int SAMPLING_FREQ = 50;
+
 void blink_4hz()
 {
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
@@ -50,6 +60,46 @@ void move_servo(uint gpio, float angle)
     pwm_set_chan_level(slice, pwm_gpio_to_channel(gpio), us);
 }
 
+void capture()
+{
+    move_servo(0, 90.0f + HORIZONTAL_FOV_HALF);
+    move_servo(3, 90.0f - VERTICAL_FOV_HALF);
+    sleep_ms(2000);
+
+    float pitch = 75.0f - VERTICAL_FOV_HALF;
+    float pitch_step = VERTICAL_FOV / VERTICAL_PIXELS;
+
+    for (int i = 0; i < VERTICAL_PIXELS; i++)
+    {
+        move_servo(3, pitch);
+        move_servo(0, 90.0f + HORIZONTAL_FOV_HALF);
+        sleep_ms(250);
+
+        float yaw = 90.0f + HORIZONTAL_FOV_HALF;
+        float yaw_step = HORIZONTAL_FOV / HORIZONTAL_PIXELS;
+
+        char pixels_s[(HORIZONTAL_PIXELS + 1) * 4];
+        memset(pixels_s, ' ', (HORIZONTAL_PIXELS + 1) * 4);
+        sprintf(pixels_s, "%03d ", i);
+        pixels_s[(HORIZONTAL_PIXELS + 1) * 4 - 1] = 0;
+
+        for (int j = 0; j < HORIZONTAL_PIXELS; j++)
+        {
+            uint8_t pixel_i = ~(adc_read() >> 4);
+            sprintf(pixels_s + (j + 1) * 4, "%03u ", pixel_i);
+
+            yaw -= yaw_step;
+            move_servo(0, yaw);
+
+            sleep_ms(1000 / SAMPLING_FREQ);
+        }
+
+        send_http_post(URL_BITMAP, pixels_s);
+
+        pitch += pitch_step;
+    }
+}
+
 void main_task(void *param)
 {
     cyw43_arch_init();
@@ -72,29 +122,17 @@ void main_task(void *param)
     init_servo(0);
     init_servo(3);
 
-    while (true)
+    while (1)
     {
-        move_servo(0, 0.0f);
-        move_servo(3, 0.0f);
-        sleep_ms(2000);
+        send_http_post(URL_STATUS, "AB");
 
-        for (float i = 0.0f; i < 180.0f; i += 180.0f / 40)
+        if (recv_http_get(URL_SHOOT, &HORIZONTAL_PIXELS, &VERTICAL_PIXELS, &SAMPLING_FREQ) == 'Y')
         {
-            char pixel_s[4];
-            uint8_t pixel_i = adc_read() >> 4;
-            pixel_i = ~pixel_i;
-            sprintf(pixel_s, "%u", pixel_i);
-            send_http_post(URL_BITMAP, pixel_s);
-
-            for (float j = 0.0f; j < 180.0f; j += 180.0f / 40)
-            {
-                move_servo(0, j);
-                sleep_ms(20);
-            }
-            move_servo(3, i);
-            move_servo(0, 0.0f);
-            sleep_ms(500);
+            send_http_post(URL_SHOOT, "OK");
+            capture();
         }
+
+        sleep_ms(2000);
     }
 }
 
@@ -102,11 +140,10 @@ void vLaunch(void)
 {
     BaseType_t xStatus;
 
-    xStatus = xTaskCreate(main_task, "BLINK", 4096, NULL, configMAX_PRIORITIES - 4, NULL);
+    xStatus = xTaskCreate(main_task, "BLINK", 1024 * 8, NULL, configMAX_PRIORITIES - 1, NULL);
 
     if (xStatus != pdPASS)
     {
-        printf("Error: xTaskCreate failed");
         exit(1);
     }
     else
@@ -123,7 +160,6 @@ int main(void)
 
     while (1)
     {
-        blink_4hz();
     }
 
     return 0;
